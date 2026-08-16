@@ -109,12 +109,13 @@ export function createMcpServer(options: McpServerOptions): McpServer {
     async ({ repo_path, base_ref, max_output_tokens, ai }) => {
       try {
         const result = await reviewRepository(
-          { repositoryPath: repo_path, baseRef: base_ref, aiEnabled: ai === true && options.aiEnabled === true },
+          { repositoryPath: repo_path, baseRef: base_ref, aiEnabled: ai === true },
           {
             allowedRoots: options.allowedRoots,
             maxChangedFiles: options.maxChangedFiles,
             maxOutputTokens: max_output_tokens ?? options.maxOutputTokens,
             analyzer: options.analyzer,
+            aiEnabled: options.aiEnabled === true,
           },
         );
         return {

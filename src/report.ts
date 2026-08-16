@@ -1,6 +1,12 @@
-import type { ReviewResult, SemanticAnalysis, ValidationResult } from "./types.js";
+import type { ReviewOutcome, ReviewResult, SemanticAnalysis, ValidationResult } from "./types.js";
 
-type DeterministicReportInput = ReviewResult & { validation?: ValidationResult[] };
+type EvidenceSummary = ReviewOutcome["evidence"];
+
+type DeterministicReportInput = ReviewResult & {
+  fallbackReason?: ReviewOutcome["fallbackReason"];
+  validation?: ValidationResult[];
+  evidence?: EvidenceSummary;
+};
 
 function printable(value: string): string {
   return value.replace(/[\0-\x1f\x7f]/g, (character) =>
@@ -16,35 +22,65 @@ function inlineCode(value: string): string {
 }
 
 export function markdownReport(input: DeterministicReportInput): string {
-  const lines = [
+  const reason = input.fallbackReason === "disabled"
+    ? "External AI analysis was disabled."
+    : input.fallbackReason === "unavailable"
+      ? "External AI analysis was requested, but no configured analyzer was available."
+      : input.fallbackReason === "failed"
+        ? "External AI analysis failed, so the deterministic report was used."
+        : input.fallbackReason === "malformed"
+          ? "External AI returned an invalid result, so the deterministic report was used."
+          : "The deterministic report was used.";
+  const summary = `${reason} Git reports ${input.totalChangedFiles} changed file(s) relative to ${input.baseRef}.`;
+  const changes = input.changedFiles.map((file) => {
+    const previous = file.previousPath ? ` from ${inlineCode(file.previousPath)}` : "";
+    return `- **${shortened(`${file.status} file`, 140)}** — Git reports ${inlineCode(file.path)} as ${file.status}${previous}.`;
+  });
+  const validation = (input.validation ?? []).map((result) =>
+    `- **${result.status.replaceAll("_", " ")} — ${shortened(result.name, 100)}:** ${shortened(result.details, 220)} ` +
+    `(command: ${inlineCode(shortenedLiteral(result.command, 180))})`,
+  );
+  if (input.evidence) {
+    validation.push(
+      `- **Inspection evidence:** ${input.evidence.filesWithPatches} patch(es), ${input.evidence.totalPatchBytes} byte(s), ` +
+      `${input.evidence.totalPatchTokens} conservative token(s); truncated: ${input.evidence.truncated ? "yes" : "no"}; ` +
+      `${input.evidence.filesOmitted} file(s) omitted, including ${input.evidence.binaryFilesExcluded} binary and ` +
+      `${input.evidence.sensitiveFilesExcluded} potentially sensitive file(s).`,
+    );
+  }
+  const details = input.changedFiles.map((file) => {
+    const previous = file.previousPath ? `; previous path: ${inlineCode(file.previousPath)}` : "";
+    return `- ${inlineCode(file.path)} — Git status: ${file.status}${previous}.`;
+  });
+  if (input.changedFilesTruncated) details.push("*Additional changed-file details were omitted by the configured limit.*");
+
+  return `${[
     "# Repository Review",
     "",
-    `- Repository: ${inlineCode(input.repositoryPath)}`,
-    `- Base ref: ${inlineCode(input.baseRef)}`,
-    `- Comparison commit: ${inlineCode(input.comparisonRef)}`,
+    "## Summary",
     "",
-    `## Changed files (${input.changedFiles.length} shown of ${input.totalChangedFiles})`,
-  ];
-
-  if (!input.changedFiles.length) lines.push("", "_No changed files._");
-  for (const file of input.changedFiles) {
-    const previous = file.previousPath ? ` from ${inlineCode(file.previousPath)}` : "";
-    lines.push(`- **${file.status}**: ${inlineCode(file.path)}${previous}`);
-  }
-  if (input.changedFilesTruncated) {
-    lines.push("", "_Changed-file list truncated. Use JSON or narrow the review scope as needed._");
-  }
-  if (input.validation?.length) {
-    lines.push("", "## Validation results", "");
-    for (const result of input.validation) {
-      lines.push(
-        `- **${result.status.replaceAll("_", " ")} — ${shortened(result.name, 100)}:** ${shortened(result.details, 220)} ` +
-        `(command: ${inlineCode(shortenedLiteral(result.command, 180))})`,
-      );
-    }
-  }
-
-  return `${lines.join("\n")}\n`;
+    shortened(summary, 500),
+    "",
+    "## Important changes + impact",
+    "",
+    ...(changes.length ? changes : ["*No changed files were detected.*"]),
+    "",
+    "## Likely improvements",
+    "",
+    "*Not inferred: deterministic mode does not generate semantic improvement claims.*",
+    "",
+    "## Regression risks",
+    "",
+    "*Not inferred: deterministic mode does not generate semantic regression claims.*",
+    "",
+    "## Validation results",
+    "",
+    ...(validation.length ? validation : ["*No validation results were produced.*"]),
+    "",
+    "## Per-file details",
+    "",
+    ...(details.length ? details : ["*No additional file-level details.*"]),
+  ].join("\n")}\n`;
 }
 
 export function jsonReport(input: ReviewResult): string {
@@ -73,16 +109,7 @@ function shortenedLiteral(value: string, maxCharacters: number): string {
 export type SemanticReportInput = ReviewResult & {
   analysis: SemanticAnalysis;
   validation: ValidationResult[];
-  evidence: {
-    filesConsidered: number;
-    filesWithPatches: number;
-    totalPatchBytes: number;
-    totalPatchTokens: number;
-    filesOmitted: number;
-    binaryFilesExcluded: number;
-    sensitiveFilesExcluded: number;
-    truncated: boolean;
-  };
+  evidence: EvidenceSummary;
 };
 
 export function semanticMarkdownReport(

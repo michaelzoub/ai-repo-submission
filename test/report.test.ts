@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { markdownReport, semanticMarkdownReport } from "../src/report.js";
 
 describe("markdownReport", () => {
-  it("lists changed files", () => {
+  it("uses the semantic report shape for deterministic changed-file facts", () => {
     const report = markdownReport({
       repositoryPath: "/work/sample",
       baseRef: "main",
@@ -12,7 +12,14 @@ describe("markdownReport", () => {
       changedFilesTruncated: false,
     });
 
-    expect(report).toContain("**modified**: ` src/index.ts `");
+    expect(report).toContain("## Summary");
+    expect(report).toContain("## Important changes + impact");
+    expect(report).toContain("- **modified file** — Git reports ` src/index.ts ` as modified.");
+    expect(report).toContain("## Likely improvements");
+    expect(report).toContain("*Not inferred: deterministic mode does not generate semantic improvement claims.*");
+    expect(report).toContain("## Regression risks");
+    expect(report).toContain("## Validation results");
+    expect(report).toContain("## Per-file details");
   });
 
   it("keeps hostile filenames inside Markdown code delimiters", () => {

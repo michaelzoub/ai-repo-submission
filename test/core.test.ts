@@ -57,6 +57,8 @@ describe("review orchestration", () => {
     expect(result.report.indexOf("## Important changes + impact")).toBeLessThan(result.report.indexOf("## Validation results"));
     expect(result.report.indexOf("## Validation results")).toBeLessThan(result.report.indexOf("## Per-file details"));
     expect(result.report).toContain("Shared semantic review");
+    expect(result.report).toContain("Likely improvement — More focused output");
+    expect(result.report).toContain("Regression risk — Changed output shape");
     expect(result.report.length).toBeLessThanOrEqual(512 * 4);
   });
 

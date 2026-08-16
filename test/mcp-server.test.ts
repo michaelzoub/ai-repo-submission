@@ -137,4 +137,26 @@ describe("MCP contract", () => {
       await client.close();
     }
   });
+
+  it("does not use server-enabled AI unless the client requests it", async () => {
+    const repositoryPath = createGitFixture();
+    fixtures.push(repositoryPath);
+    writeFileSync(join(repositoryPath, "untracked.txt"), "new\n");
+    const analyze = vi.fn(async () => sharedAnalysis);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const server = createMcpServer({ allowedRoots: [repositoryPath], aiEnabled: true, analyzer: { analyze } });
+    const client = new Client({ name: "request-policy-test", version: "1.0.0" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const result = await client.callTool({
+        name: "review_repository",
+        arguments: { repo_path: repositoryPath, base_ref: "main" },
+      });
+      expect(result.structuredContent).toMatchObject({ analysis_mode: "deterministic", fallback_reason: "disabled" });
+      expect(analyze).not.toHaveBeenCalled();
+    } finally {
+      await client.close();
+    }
+  });
 });

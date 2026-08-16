@@ -130,7 +130,12 @@ export async function reviewRepository(
     }
   }
 
-  const fallback = boundedFallbackMarkdown({ ...basicResult, validation }, maxOutputTokens);
+  const fallback = boundedFallbackMarkdown({
+    ...basicResult,
+    fallbackReason,
+    validation,
+    evidence: evidenceSummary,
+  }, maxOutputTokens);
   return {
     ...basicResult,
     analysisMode: "deterministic",
