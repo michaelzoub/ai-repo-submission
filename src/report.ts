@@ -13,13 +13,6 @@ function inlineCode(value: string): string {
   return `${delimiter} ${safe} ${delimiter}`;
 }
 
-function codeBlock(output: string): string[] {
-  if (!output) return ["_No output._"];
-  const longestRun = Math.max(2, ...[...output.matchAll(/`+/g)].map((match) => match[0].length));
-  const fence = "`".repeat(longestRun + 1);
-  return [fence, output, fence];
-}
-
 export function markdownReport(input: ReviewResult): string {
   const lines = [
     "# Repository Review",
@@ -40,19 +33,6 @@ export function markdownReport(input: ReviewResult): string {
     lines.push("", "_Changed-file list truncated. Use JSON or narrow the review scope as needed._");
   }
 
-  lines.push("", "## Validation results");
-  if (!input.validationResults.length) lines.push("", "_Not run._");
-  for (const result of input.validationResults) {
-    const exit = result.exitCode === null ? "none" : String(result.exitCode);
-    lines.push(
-      "",
-      `### ${inlineCode(result.command)}`,
-      "",
-      `Status: **${result.status}**; exit code: ${inlineCode(exit)}`,
-    );
-    if (result.outputTruncated) lines.push("", "_Output truncated._");
-    lines.push("", ...codeBlock(result.output));
-  }
   return `${lines.join("\n")}\n`;
 }
 

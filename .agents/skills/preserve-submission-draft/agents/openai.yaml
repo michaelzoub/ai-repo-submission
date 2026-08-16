@@ -1,0 +1,4 @@
+interface:
+  display_name: "Preserve Submission Draft"
+  short_description: "Prevent premature submission form completion"
+  default_prompt: "Use $preserve-submission-draft to update only the explicitly completed parts of SUBMISSION.md."

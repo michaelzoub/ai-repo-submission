@@ -6,7 +6,6 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { reviewRepository } from "./core.js";
 import { InspectionError } from "./git.js";
-import { markdownReport } from "./report.js";
 
 export type McpServerOptions = {
   allowedRoots: string[];
@@ -25,8 +24,12 @@ function structuredResult(result: Awaited<ReturnType<typeof reviewRepository>>) 
     })),
     total_changed_files: result.totalChangedFiles,
     changed_files_truncated: result.changedFilesTruncated,
-    validation_results: result.validationResults,
   };
+}
+
+function compactSummary(result: Awaited<ReturnType<typeof reviewRepository>>): string {
+  const truncation = result.changedFilesTruncated ? "; result truncated" : "";
+  return `Repository review: ${result.totalChangedFiles} changed files; ${result.changedFiles.length} returned${truncation}.`;
 }
 
 export function createMcpServer(options: McpServerOptions): McpServer {
@@ -43,7 +46,7 @@ export function createMcpServer(options: McpServerOptions): McpServer {
       title: "Review Git repository",
       description:
         "Read-only review of committed, staged, unstaged, and untracked changes relative to a base ref. " +
-        "The repository must be inside a server-configured allowed root. Validation command execution is intentionally unavailable over MCP.",
+        "The repository must be inside a server-configured allowed root. This server exposes no command-execution capability.",
       inputSchema: {
         repo_path: z.string().min(1).max(4096).describe("Repository path inside an allowed root."),
         base_ref: z.string().min(1).max(1024).optional().describe("Base commit or branch; defaults to main."),
@@ -55,7 +58,6 @@ export function createMcpServer(options: McpServerOptions): McpServer {
         changed_files: z.array(changedFileSchema),
         total_changed_files: z.number().int().nonnegative(),
         changed_files_truncated: z.boolean(),
-        validation_results: z.array(z.unknown()).max(0).describe("Always empty; MCP is read-only."),
       },
       annotations: {
         readOnlyHint: true,
@@ -70,12 +72,11 @@ export function createMcpServer(options: McpServerOptions): McpServer {
           { repositoryPath: repo_path, baseRef: base_ref },
           {
             allowedRoots: options.allowedRoots,
-            allowValidation: false,
             maxChangedFiles: options.maxChangedFiles,
           },
         );
         return {
-          content: [{ type: "text" as const, text: markdownReport(result) }],
+          content: [{ type: "text" as const, text: compactSummary(result) }],
           structuredContent: structuredResult(result),
         };
       } catch (error) {

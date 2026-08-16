@@ -11,5 +11,7 @@ describe("parseArgs", () => {
   it("rejects missing values and unknown options", () => {
     expect(() => parseArgs(["review", "--repo"])).toThrow("--repo requires a value");
     expect(() => parseArgs(["review", "--wat", "value"])).toThrow("Unknown option");
+    expect(() => parseArgs(["review", "--validate", "npm test"])).toThrow("Unknown option");
+    expect(() => parseArgs(["review", "--output", "report.md"])).toThrow("Unknown option");
   });
 });

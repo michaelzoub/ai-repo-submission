@@ -17,6 +17,7 @@ function git(repositoryPath: string, args: string[]): string {
   try {
     return execFileSync("git", ["-c", "core.fsmonitor=false", ...args], {
       cwd: repositoryPath,
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
       encoding: "utf8",
       timeout: GIT_TIMEOUT_MS,
       maxBuffer: GIT_MAX_OUTPUT_BYTES,

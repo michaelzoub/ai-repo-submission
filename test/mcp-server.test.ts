@@ -37,8 +37,11 @@ describe("MCP contract", () => {
         base_ref: "main",
         total_changed_files: 1,
         changed_files: [{ path: "untracked.txt", status: "untracked" }],
-        validation_results: [],
       });
+      expect(result.content).toEqual([{
+        type: "text",
+        text: "Repository review: 1 changed files; 1 returned.",
+      }]);
 
       const denied = await client.callTool({
         name: "review_repository",
