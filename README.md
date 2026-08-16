@@ -5,15 +5,21 @@ Repository Inspector performs bounded, read-only inspection of Git changes relat
 - Developers and shell-capable agents can invoke the CLI.
 - MCP-capable agents can invoke the same shared review operation through a discoverable, typed tool.
 
-Both adapters call the same review orchestration, Git parser, limits, optional AI analyzer, validation, and renderers. Neither interface accepts shell commands, runs repository code, changes Git state, or writes a report file. The CLI emits Markdown or JSON on stdout; callers may decide whether to display, pipe, or persist it.
+Both adapters call the same review orchestration, Git parser, limits, optional AI analyzer, Git validation, and renderers. The local CLI can additionally run one explicitly supplied, bounded `--validate` shell command; MCP exposes no command-execution path. The review core does not change Git state or write a report file, although a caller-authorized validation command runs with the caller's privileges. The CLI emits Markdown or JSON on stdout; callers may decide whether to display, pipe, or persist it.
 
 ## What a review includes
 
 The inspector resolves the merge base of the requested base ref and `HEAD`, then compares that commit with the current working state. This includes committed branch changes, staged changes, unstaged changes, renames, copies, and untracked (but not ignored) files. Paths are parsed from Git's NUL-delimited output, so spaces, tabs, and newlines are preserved.
 
-When AI is configured, the report contains a short semantic summary, important changes and their impact, Git validation results, and concise details for relevant files. The model receives bounded patch evidence and returns structured data; application code validates that data and renders deterministic Markdown. AI failures, malformed responses, and disabled or missing AI configuration fall back to the existing deterministic `markdownReport()`.
+When AI is explicitly enabled and configured, the report contains a short semantic summary, important changes ordered by significance, explicit likely improvements, explicit regression risks, local validation results, and concise details for relevant files. Likely improvements and regression risks are separate required arrays in the provider JSON contract and separate Markdown sections. Application code validates every field and file reference, then renders Markdown deterministically. AI failures, timeouts, malformed responses, and disabled or missing AI configuration fall back cleanly to the deterministic report.
 
-At most 500 changed-file records are returned. Patch evidence is prioritized and bounded to 40 files, 16 KiB per file, and 96 KiB total by default. Git subprocesses and provider requests have timeouts and output limits. The Markdown report defaults to a strict 1,800-token budget; lower-priority file details are omitted first.
+At most 500 changed-file records are returned. AI evidence is prioritized and bounded by both bytes and a deliberately conservative token upper bound. Defaults are 40 files, 16 KiB and 4,000 conservative tokens per file, and 96 KiB and 24,000 conservative tokens globally. Since the token upper bound counts each UTF-8 byte as a possible token, the token cap is intentionally cautious across downstream model tokenizers. Git subprocesses and provider requests also have timeouts and output limits. The Markdown report defaults to a 1,800-token budget; lower-priority file details are omitted first.
+
+### External-model trust boundary
+
+Only bounded changed hunks produced by `git diff -U3` are eligible for external source analysis. For untracked files, the equivalent local command is `git diff --no-index -U3 -- /dev/null <path>`. The inspector retains hunk coordinates plus added, removed, and three surrounding context lines; it strips diff headers and Git's optional out-of-window function label. Existing files are not sent as whole-source snapshots. A new file is represented almost entirely as additions, so it may still expose much of its contents before the per-file and global byte/token limits apply. Partial final lines are dropped instead of forwarding fragments.
+
+The OpenRouter request contains included file paths/statuses, bounded hunks, per-file/global size and truncation metadata, and validation names/statuses. Validation commands and their output stay local because a validation command could print source. Binary files are absent entirely. Likely credential files and patches containing likely credentials are also omitted rather than rewritten, preserving the exact lines of every hunk that is sent. The request contains no repository path, arbitrary file-reading or command tool, or mechanism for the model to request more source or execute repository code. Evidence truncation and omission counts are recorded in the provider payload and in CLI JSON/MCP structured output.
 
 ## Setup and verification
 
@@ -34,6 +40,8 @@ The production build writes runtime files only to `dist/`; the executable is `di
 npm run inspector -- review --repo ./path/to/repo
 npm run inspector -- review --repo ./path/to/repo --base-ref origin/main
 npm run inspector -- review --repo ./path/to/repo --max-output-tokens 1200
+npm run inspector -- review --repo ./path/to/repo --ai
+npm run inspector -- review --repo ./path/to/repo --validate "npm test"
 npm run inspector -- review --repo ./path/to/repo --no-ai
 npm run inspector -- review --repo ./path/to/repo --format json
 npm run inspector -- review --repo ./path/to/repo > review-report.md
@@ -41,9 +49,9 @@ npm run inspector -- review --repo ./path/to/repo > review-report.md
 
 Markdown is the default format. Output always goes to stdout. Use `--help` for all options. Exit status is `0` when inspection succeeds, including when AI falls back, and `1` for an inspection or usage error.
 
-OpenRouter analysis is enabled when `OPENROUTER_API_KEY` is present. `OPENROUTER_MODEL` selects the model and defaults to `openai/gpt-4.1-mini`; `OPENROUTER_BASE_URL` overrides the HTTPS API base; `INSPECTOR_AI_TIMEOUT_MS` controls the bounded request timeout; and `INSPECTOR_AI_ENABLED=false` disables AI globally. The `ChangeAnalyzer` interface is provider-neutral, so another implementation can be injected without changing core review behavior.
+External AI is opt-in. The CLI requires either `--ai` or `INSPECTOR_AI_ENABLED=true`; `--no-ai` overrides the environment. `OPENROUTER_API_KEY` supplies credentials but does not authorize source-code egress by itself. `OPENROUTER_MODEL` selects the model and defaults to `openai/gpt-4.1-mini`; `OPENROUTER_BASE_URL` overrides the HTTPS API base; and `INSPECTOR_AI_TIMEOUT_MS` controls the bounded request timeout. The `ChangeAnalyzer` interface is provider-neutral, so another implementation can be injected without changing core review behavior.
 
-The CLI exposes named review options, not a generic command runner. Redirection in the last example is performed by the caller's shell and is outside the inspector's capability boundary.
+`--validate` is local-CLI-only and executes one caller-supplied shell command in the canonical repository root. It has a 60-second timeout, ignores stdin, and captures at most 16 KiB of combined stdout/stderr for the local report. The external AI receives only the validation name and pass/fail status, never the command or output. Redirection in the last example is performed by the caller's shell and is outside the inspector's capability boundary.
 
 ## MCP
 
@@ -64,17 +72,17 @@ The `review_repository` tool accepts:
 - `repo_path` (required): repository or subdirectory inside an allowed root.
 - `base_ref` (optional): base commit or branch; defaults to `main`.
 - `max_output_tokens` (optional): Markdown budget between 256 and the server limit.
-- `ai` (optional): whether to use configured AI analysis.
+- `ai` (optional): requests external AI. It is effective only when the server/operator also started the server with `INSPECTOR_AI_ENABLED=true`; a client cannot override disabled server policy.
 
-It returns the same budgeted Markdown as the CLI plus the bounded result as structured output. Its annotations declare it read-only, idempotent, non-destructive, and closed-world. These annotations describe the contract; they are not enforcement.
+It returns the same shared-core, budgeted Markdown as the CLI plus the bounded result as structured output. There is deliberately no validation-command input. Its annotations declare it read-only, idempotent, non-destructive, and closed-world. These annotations describe the contract; they are not enforcement.
 
 ## Security model
 
-“Read-only” means named, allowlisted inspection operations—not arbitrary user-supplied commands described as reads. Internally, the program invokes only fixed Git operations with separately passed arguments. It disables external diff drivers, text conversion, filesystem monitors, stdin, and Git's optional lock-taking side effects. Repository paths are canonicalized before allowed-root checks.
+For MCP, “read-only” means named, allowlisted inspection operations—not arbitrary user-supplied commands described as reads. Its path invokes only fixed Git operations with separately passed arguments. Those operations disable external diff drivers, text conversion, filesystem monitors, stdin, and Git's optional lock-taking side effects. Repository paths are canonicalized before allowed-root checks. The CLI's explicitly requested `--validate` command is a separate local trust decision and is never exposed to OpenRouter.
 
-Patch and command output, collection time, provider request/response size, provider time, and rendered output are bounded. Binary files, untracked symlinks, and likely credential files are excluded from AI content. Likely secret-bearing changed lines are redacted. Repository paths are not sent to the provider. Filenames, patches, and provider output remain untrusted data; AI output must match a strict schema, may reference only known files, and is escaped by the deterministic renderer.
+Patch and command output, collection time, provider request/response size, provider time, and rendered output are bounded. Binary files, untracked symlinks, likely credential files, and patches with likely credential material are excluded from AI content. Repository paths are not sent to the provider. Filenames, patches, validation results, and provider output remain untrusted data; AI output must match a strict schema, may reference only files whose hunks were supplied, and is escaped by the deterministic renderer.
 
-These filters are safeguards, not a complete secret scanner. Use `--no-ai` when repository policy prohibits sending source to an external provider.
+These filters are safeguards, not a complete secret scanner. Leave AI disabled when repository policy prohibits sending source to an external provider.
 
 Allowed roots and MCP annotations are defense in depth, not an operating-system sandbox. For cloud or local agent use, run the process with OS-enforced read-only access to only the target checkout, no unrelated credentials, and bounded CPU, memory, process, and network privileges. The stdio server should run inside the agent's existing task sandbox; MCP itself does not create one.
 
@@ -93,6 +101,6 @@ The decision is supported by primary sources:
 ## Remaining limitations
 
 - The default base is literally `main`; repositories using another default branch must pass `--base-ref`/`base_ref`.
-- Validation is limited to `git diff --check`; the inspector does not run builds, tests, hooks, or arbitrary commands.
-- Semantic coverage is bounded and may omit low-priority files; the result reports evidence coverage and truncation.
+- MCP validation is limited to the fixed local `git diff --check`. The local CLI can run one bounded arbitrary `--validate` command with the caller's privileges; it is not an OS sandbox.
+- Semantic coverage is bounded and may omit low-priority, binary, sensitive, unsupported, or unreadable files; the result reports evidence coverage, omissions, and truncation.
 - Secret filtering is heuristic. Disable external AI when stronger data-boundary guarantees are required.

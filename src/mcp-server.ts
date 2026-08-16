@@ -6,6 +6,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { reviewRepository } from "./core.js";
 import { InspectionError } from "./git.js";
+import { externalAiEnabledByEnvironment } from "./openrouter.js";
 import type { ChangeAnalyzer } from "./types.js";
 
 export type McpServerOptions = {
@@ -35,6 +36,10 @@ function structuredResult(result: Awaited<ReturnType<typeof reviewRepository>>) 
       files_considered: result.evidence.filesConsidered,
       files_with_patches: result.evidence.filesWithPatches,
       total_patch_bytes: result.evidence.totalPatchBytes,
+      total_patch_tokens_upper_bound: result.evidence.totalPatchTokens,
+      files_omitted: result.evidence.filesOmitted,
+      binary_files_excluded: result.evidence.binaryFilesExcluded,
+      sensitive_files_excluded: result.evidence.sensitiveFilesExcluded,
       truncated: result.evidence.truncated,
     },
     report_markdown: result.report,
@@ -63,7 +68,7 @@ export function createMcpServer(options: McpServerOptions): McpServer {
         base_ref: z.string().min(1).max(1024).optional().describe("Base commit or branch; defaults to main."),
         max_output_tokens: z.number().int().min(256).max(options.maxOutputTokens ?? 8_000).optional()
           .describe("Maximum Markdown report budget; defaults to the server policy or 1800."),
-        ai: z.boolean().optional().describe("Use configured AI analysis when available; defaults to the server policy."),
+        ai: z.boolean().optional().describe("Request AI analysis. Effective only when server policy also enables external AI."),
       },
       outputSchema: {
         repository_path: z.string(),
@@ -76,6 +81,7 @@ export function createMcpServer(options: McpServerOptions): McpServer {
         fallback_reason: z.enum(["disabled", "unavailable", "failed", "malformed"]).optional(),
         validation: z.array(z.object({
           name: z.string(),
+          command: z.string(),
           status: z.enum(["passed", "failed", "not_run"]),
           details: z.string(),
         })),
@@ -83,6 +89,10 @@ export function createMcpServer(options: McpServerOptions): McpServer {
           files_considered: z.number().int().nonnegative(),
           files_with_patches: z.number().int().nonnegative(),
           total_patch_bytes: z.number().int().nonnegative(),
+          total_patch_tokens_upper_bound: z.number().int().nonnegative(),
+          files_omitted: z.number().int().nonnegative(),
+          binary_files_excluded: z.number().int().nonnegative(),
+          sensitive_files_excluded: z.number().int().nonnegative(),
           truncated: z.boolean(),
         }),
         report_markdown: z.string(),
@@ -99,7 +109,7 @@ export function createMcpServer(options: McpServerOptions): McpServer {
     async ({ repo_path, base_ref, max_output_tokens, ai }) => {
       try {
         const result = await reviewRepository(
-          { repositoryPath: repo_path, baseRef: base_ref, aiEnabled: ai ?? options.aiEnabled },
+          { repositoryPath: repo_path, baseRef: base_ref, aiEnabled: ai === true && options.aiEnabled === true },
           {
             allowedRoots: options.allowedRoots,
             maxChangedFiles: options.maxChangedFiles,
@@ -126,7 +136,10 @@ function configuredRoots(): string[] {
 }
 
 async function main(): Promise<void> {
-  const server = createMcpServer({ allowedRoots: configuredRoots() });
+  const server = createMcpServer({
+    allowedRoots: configuredRoots(),
+    aiEnabled: externalAiEnabledByEnvironment(),
+  });
   await server.connect(new StdioServerTransport());
 }
 

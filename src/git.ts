@@ -155,6 +155,8 @@ type EvidenceLimits = {
   maxFiles: number;
   maxPatchBytes: number;
   maxPatchBytesPerFile: number;
+  maxPatchTokens?: number;
+  maxPatchTokensPerFile?: number;
 };
 
 function boundedGit(
@@ -166,14 +168,15 @@ function boundedGit(
   const result = spawnSync("git", ["-c", "core.fsmonitor=false", ...args], {
     cwd: repositoryPath,
     env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
-    encoding: "utf8",
     timeout,
     maxBuffer: maxBytes,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  const output = (result.stdout ?? "").slice(0, maxBytes);
+  const stdout = Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.alloc(0);
+  let output = stdout.subarray(0, maxBytes).toString("utf8");
+  while (output.endsWith("\ufffd")) output = output.slice(0, -1);
   const error = result.error instanceof Error ? result.error : undefined;
-  const truncated = Boolean(error && "code" in error && error.code === "ENOBUFS") || output.length >= maxBytes;
+  const truncated = Boolean(error && "code" in error && error.code === "ENOBUFS") || stdout.byteLength >= maxBytes;
   return { output, truncated, status: result.status, error };
 }
 
@@ -182,7 +185,15 @@ function truncateUtf8(value: string, maxBytes: number): { value: string; truncat
   if (encoded.length <= maxBytes) return { value, truncated: false };
   let shortened = encoded.subarray(0, maxBytes).toString("utf8");
   if (shortened.endsWith("\ufffd")) shortened = shortened.slice(0, -1);
+  const lastCompleteLine = shortened.lastIndexOf("\n");
+  shortened = lastCompleteLine >= 0 ? shortened.slice(0, lastCompleteLine + 1) : "";
   return { value: shortened, truncated: true };
+}
+
+// UTF-8 bytes are a conservative token upper bound for the byte-level tokenizers
+// used by supported downstream models. This intentionally favors disclosure safety.
+function conservativeTokenUpperBound(value: string): number {
+  return Buffer.byteLength(value);
 }
 
 function isSensitivePath(path: string): boolean {
@@ -193,23 +204,13 @@ function isSensitivePath(path: string): boolean {
   return /^(id_(rsa|dsa|ecdsa|ed25519)|credentials\.json|service-account\.json)$/.test(name);
 }
 
-function redactPotentialSecrets(patch: string): string {
+function containsPotentialSecret(patch: string): boolean {
   const sensitiveAssignment = /(?:api[_-]?key|access[_-]?token|client[_-]?secret|password|authorization)\s*[:=]/i;
   const credentialValue = /(?:sk-[a-z0-9_-]{16,}|gh[opurs]_[a-z0-9]{20,}|[a-f0-9]{40,}|[a-z0-9+/]{48,}={0,2})/i;
-  let inPrivateKey = false;
-  return patch.split("\n").map((line) => {
-    if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(line)) inPrivateKey = true;
-    if (inPrivateKey) {
-      const prefix = line.startsWith("+") || line.startsWith("-") ? line[0] : "";
-      if (/-----END [A-Z ]*PRIVATE KEY-----/.test(line)) inPrivateKey = false;
-      return `${prefix}[REDACTED: private key material]`;
-    }
-    if ((line.startsWith("+") || line.startsWith("-")) &&
-        (sensitiveAssignment.test(line) || credentialValue.test(line))) {
-      return `${line[0]}[REDACTED: potentially sensitive value]`;
-    }
-    return line;
-  }).join("\n");
+  return patch.split("\n").some((line) =>
+    (line.startsWith("+") || line.startsWith("-")) &&
+    (sensitiveAssignment.test(line) || credentialValue.test(line) || /-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(line)),
+  );
 }
 
 function filePriority(file: ChangedFile): number {
@@ -223,40 +224,39 @@ function filePriority(file: ChangedFile): number {
   return 20;
 }
 
-function untrackedPatch(repositoryPath: string, path: string, maxBytes: number): FileEvidence {
+function untrackedFileKind(repositoryPath: string, path: string): "text" | "binary" | "unsupported" | "read_error" {
   const candidate = resolve(repositoryPath, path);
   try {
     if (!isWithin(candidate, repositoryPath) || lstatSync(candidate).isSymbolicLink()) {
-      return { path, status: "untracked", patchBytes: 0, patchTruncated: false, binary: false, omittedReason: "unsupported_file" };
+      return "unsupported";
     }
     const descriptor = openSync(candidate, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     try {
       const stats = fstatSync(descriptor);
-      if (!stats.isFile()) {
-        return { path, status: "untracked", patchBytes: 0, patchTruncated: false, binary: false, omittedReason: "unsupported_file" };
-      }
-      const buffer = Buffer.alloc(Math.min(maxBytes + 1, stats.size));
+      if (!stats.isFile()) return "unsupported";
+      const buffer = Buffer.alloc(Math.min(8_192, stats.size));
       const bytesRead = readSync(descriptor, buffer, 0, buffer.length, 0);
       const bytes = buffer.subarray(0, bytesRead);
-      if (bytes.subarray(0, 8_192).includes(0)) {
-        return { path, status: "untracked", patchBytes: 0, patchTruncated: false, binary: true, omittedReason: "binary" };
-      }
-      const content = redactPotentialSecrets(bytes.toString("utf8"));
-      const limited = truncateUtf8(`Untracked text file contents:\n${content}`, maxBytes);
-      return {
-        path,
-        status: "untracked",
-        patch: limited.value,
-        patchBytes: Buffer.byteLength(limited.value),
-        patchTruncated: limited.truncated || stats.size > maxBytes,
-        binary: false,
-      };
+      return bytes.includes(0) ? "binary" : "text";
     } finally {
       closeSync(descriptor);
     }
   } catch {
-    return { path, status: "untracked", patchBytes: 0, patchTruncated: false, binary: false, omittedReason: "read_error" };
+    return "read_error";
   }
+}
+
+function diffHunks(output: string): { patch: string; binary: boolean } {
+  const binary = /(?:^|\n)(?:Binary files .* differ|GIT binary patch)(?:\n|$)/.test(output) || output.includes("\0");
+  if (binary) return { patch: "", binary: true };
+  const firstHunk = output.search(/^@@ /m);
+  const patch = firstHunk >= 0 ? output.slice(firstHunk) : "";
+  // Git may append a function/section label copied from outside the requested
+  // context window. Retain only hunk coordinates so no extra source crosses the boundary.
+  return {
+    patch: patch.replace(/^(@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@).*$/gm, "$1"),
+    binary: false,
+  };
 }
 
 export function collectDiffEvidence(
@@ -267,61 +267,110 @@ export function collectDiffEvidence(
 ): DiffEvidence {
   const deadline = Date.now() + EVIDENCE_COLLECTION_TIMEOUT_MS;
   const selected = [...files].sort((a, b) => filePriority(a) - filePriority(b) || a.path.localeCompare(b.path));
+  const maxPatchTokens = limits.maxPatchTokens ?? limits.maxPatchBytes;
+  const maxPatchTokensPerFile = limits.maxPatchTokensPerFile ?? limits.maxPatchBytesPerFile;
   const evidence: FileEvidence[] = [];
   let totalPatchBytes = 0;
+  let totalPatchTokens = 0;
+  let binaryFilesExcluded = 0;
+  let sensitiveFilesExcluded = 0;
   let truncated = selected.length > limits.maxFiles;
 
   for (const file of selected.slice(0, limits.maxFiles)) {
-    if (Date.now() >= deadline || totalPatchBytes >= limits.maxPatchBytes) {
-      evidence.push({ ...file, patchBytes: 0, patchTruncated: false, binary: false, omittedReason: "budget" });
+    if (Date.now() >= deadline || totalPatchBytes >= limits.maxPatchBytes || totalPatchTokens >= maxPatchTokens) {
       truncated = true;
       continue;
     }
     if (isSensitivePath(file.path) || (file.previousPath && isSensitivePath(file.previousPath))) {
-      evidence.push({ ...file, patchBytes: 0, patchTruncated: false, binary: false, omittedReason: "sensitive_path" });
+      sensitiveFilesExcluded++;
       continue;
     }
 
-    const remaining = Math.min(limits.maxPatchBytes - totalPatchBytes, limits.maxPatchBytesPerFile);
-    let item: FileEvidence;
+    const remaining = Math.min(
+      limits.maxPatchBytes - totalPatchBytes,
+      limits.maxPatchBytesPerFile,
+      maxPatchTokens - totalPatchTokens,
+      maxPatchTokensPerFile,
+    );
+    const commandLimit = Math.min(1024 * 1024, remaining + 8 * 1024);
+    let result: ReturnType<typeof boundedGit>;
     if (file.status === "untracked") {
-      item = { ...untrackedPatch(repositoryPath, file.path, remaining), ...file };
-    } else {
-      const result = boundedGit(
+      const kind = untrackedFileKind(repositoryPath, file.path);
+      if (kind === "binary") {
+        binaryFilesExcluded++;
+        continue;
+      }
+      if (kind !== "text") continue;
+      const nullDevice = process.platform === "win32" ? "NUL" : "/dev/null";
+      result = boundedGit(
         repositoryPath,
-        ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=3", "--find-renames", "--find-copies", comparisonRef, "--", file.path],
-        remaining,
+        ["diff", "--no-index", "--no-ext-diff", "--no-textconv", "--no-color", "-U3", "--", nullDevice, file.path],
+        commandLimit,
+        Math.max(1, Math.min(PATCH_COMMAND_TIMEOUT_MS, deadline - Date.now())),
+      );
+      if (result.status !== 1 && !result.truncated) {
+        if (result.error) truncated = true;
+        continue;
+      }
+    } else {
+      result = boundedGit(
+        repositoryPath,
+        ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "-U3", "--find-renames", "--find-copies", comparisonRef, "--", file.path],
+        commandLimit,
         Math.max(1, Math.min(PATCH_COMMAND_TIMEOUT_MS, deadline - Date.now())),
       );
       if (result.status !== 0 && !result.truncated) {
-        item = { ...file, patchBytes: 0, patchTruncated: false, binary: false, omittedReason: "read_error" };
-      } else {
-        const binary = /(?:^|\n)Binary files .* differ(?:\n|$)/.test(result.output);
-        const redacted = binary ? "" : redactPotentialSecrets(result.output);
-        const limited = truncateUtf8(redacted, remaining);
-        item = {
-          ...file,
-          ...(limited.value ? { patch: limited.value } : {}),
-          patchBytes: Buffer.byteLength(limited.value),
-          patchTruncated: result.truncated || limited.truncated,
-          binary,
-          ...(binary ? { omittedReason: "binary" as const } : {}),
-        };
+        if (result.error) truncated = true;
+        continue;
       }
     }
+
+    const extracted = diffHunks(result.output);
+    if (extracted.binary) {
+      binaryFilesExcluded++;
+      continue;
+    }
+    if (!extracted.patch) {
+      if (result.truncated) truncated = true;
+      continue;
+    }
+    if (containsPotentialSecret(extracted.patch)) {
+      sensitiveFilesExcluded++;
+      continue;
+    }
+    const limited = truncateUtf8(extracted.patch, remaining);
+    if (!limited.value) {
+      truncated = true;
+      continue;
+    }
+    const item: FileEvidence = {
+      ...file,
+      patch: limited.value,
+      patchBytes: Buffer.byteLength(limited.value),
+      patchTokens: conservativeTokenUpperBound(limited.value),
+      patchTruncated: result.truncated || limited.truncated,
+    };
     evidence.push(item);
     totalPatchBytes += item.patchBytes;
-    if (item.patchTruncated || item.omittedReason === "budget") truncated = true;
+    totalPatchTokens += item.patchTokens;
+    if (item.patchTruncated) truncated = true;
   }
 
-  return { files: evidence, filesConsidered: Math.min(selected.length, limits.maxFiles), totalPatchBytes, truncated };
-}
-
-function cleanCommandOutput(output: string): string {
-  return output.replace(/[\0-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "?").replace(/\s+/g, " ").trim().slice(0, 500);
+  return {
+    files: evidence,
+    filesConsidered: Math.min(selected.length, limits.maxFiles),
+    totalPatchBytes,
+    totalPatchTokens,
+    filesOmitted: files.length - evidence.length,
+    binaryFilesExcluded,
+    sensitiveFilesExcluded,
+    limits: { ...limits, maxPatchTokens, maxPatchTokensPerFile },
+    truncated,
+  };
 }
 
 export function validateDiff(repositoryPath: string, comparisonRef: string): ValidationResult[] {
+  const command = `git diff --check ${comparisonRef} --`;
   const result = boundedGit(
     repositoryPath,
     ["diff", "--no-ext-diff", "--no-textconv", "--check", comparisonRef, "--"],
@@ -329,11 +378,16 @@ export function validateDiff(repositoryPath: string, comparisonRef: string): Val
     10_000,
   );
   if (result.error && !result.truncated) {
-    return [{ name: "Git diff check", status: "not_run", details: "The bounded Git validation command could not complete." }];
+    return [{ name: "Git diff check", command, status: "not_run", details: "The bounded Git validation command could not complete." }];
   }
   if (result.status === 0) {
-    return [{ name: "Git diff check", status: "passed", details: "No whitespace errors were reported in tracked changes." }];
+    return [{ name: "Git diff check", command, status: "passed", details: "No whitespace errors were reported in tracked changes." }];
   }
-  const details = cleanCommandOutput(result.output) || "Git reported whitespace errors in tracked changes.";
-  return [{ name: "Git diff check", status: "failed", details: result.truncated ? `${details} (output truncated)` : details }];
+  const details = "Git reported whitespace errors in tracked changes; offending source lines were omitted.";
+  return [{
+    name: "Git diff check",
+    command,
+    status: "failed",
+    details: result.truncated ? `${details} Validation command output was truncated.` : details,
+  }];
 }

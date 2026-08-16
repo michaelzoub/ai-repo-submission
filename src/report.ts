@@ -1,5 +1,7 @@
 import type { ReviewResult, SemanticAnalysis, ValidationResult } from "./types.js";
 
+type DeterministicReportInput = ReviewResult & { validation?: ValidationResult[] };
+
 function printable(value: string): string {
   return value.replace(/[\0-\x1f\x7f]/g, (character) =>
     JSON.stringify(character).slice(1, -1),
@@ -13,7 +15,7 @@ function inlineCode(value: string): string {
   return `${delimiter} ${safe} ${delimiter}`;
 }
 
-export function markdownReport(input: ReviewResult): string {
+export function markdownReport(input: DeterministicReportInput): string {
   const lines = [
     "# Repository Review",
     "",
@@ -31,6 +33,15 @@ export function markdownReport(input: ReviewResult): string {
   }
   if (input.changedFilesTruncated) {
     lines.push("", "_Changed-file list truncated. Use JSON or narrow the review scope as needed._");
+  }
+  if (input.validation?.length) {
+    lines.push("", "## Validation results", "");
+    for (const result of input.validation) {
+      lines.push(
+        `- **${result.status.replaceAll("_", " ")} — ${shortened(result.name, 100)}:** ${shortened(result.details, 220)} ` +
+        `(command: ${inlineCode(shortenedLiteral(result.command, 180))})`,
+      );
+    }
   }
 
   return `${lines.join("\n")}\n`;
@@ -62,7 +73,16 @@ function shortenedLiteral(value: string, maxCharacters: number): string {
 export type SemanticReportInput = ReviewResult & {
   analysis: SemanticAnalysis;
   validation: ValidationResult[];
-  evidence: { filesConsidered: number; filesWithPatches: number; truncated: boolean };
+  evidence: {
+    filesConsidered: number;
+    filesWithPatches: number;
+    totalPatchBytes: number;
+    totalPatchTokens: number;
+    filesOmitted: number;
+    binaryFilesExcluded: number;
+    sensitiveFilesExcluded: number;
+    truncated: boolean;
+  };
 };
 
 export function semanticMarkdownReport(
@@ -75,15 +95,26 @@ export function semanticMarkdownReport(
     `- **${shortened(change.title, 140)}** — ${shortened(change.impact, 360)}` +
     (change.files.length ? ` (${change.files.map(inlineCode).join(", ")})` : ""),
   );
+  let improvements = input.analysis.likelyImprovements.map((improvement) =>
+    `- **Likely improvement — ${shortened(improvement.title, 140)}:** ${shortened(improvement.rationale, 360)}` +
+    (improvement.files.length ? ` (${improvement.files.map(inlineCode).join(", ")})` : ""),
+  );
+  let risks = input.analysis.regressionRisks.map((risk) =>
+    `- **Regression risk — ${shortened(risk.title, 140)}:** ${shortened(risk.rationale, 360)}` +
+    (risk.files.length ? ` (${risk.files.map(inlineCode).join(", ")})` : ""),
+  );
   let details = input.analysis.fileDetails.map((detail) =>
     `- ${inlineCode(detail.path)} — ${shortened(detail.detail, 360)}`,
   );
   const validationLines = (detailLength: number): string[] => [
     ...input.validation.map((result) =>
-      `- **${result.status.replaceAll("_", " ")} — ${shortened(result.name, 100)}:** ${shortened(result.details, detailLength)}`,
+      `- **${result.status.replaceAll("_", " ")} — ${shortened(result.name, 100)}:** ${shortened(result.details, detailLength)} ` +
+      `(command: ${inlineCode(shortenedLiteral(result.command, 180))})`,
     ),
-    `- **Inspection coverage:** patches read for ${input.evidence.filesWithPatches} of ${input.evidence.filesConsidered} prioritized files` +
-      (input.evidence.truncated ? "; evidence was bounded or truncated." : "."),
+    `- **AI evidence:** ${input.evidence.filesWithPatches} patch(es), ${input.evidence.totalPatchBytes} byte(s), ` +
+      `${input.evidence.totalPatchTokens} conservative token(s); truncated: ${input.evidence.truncated ? "yes" : "no"}; ` +
+      `${input.evidence.filesOmitted} file(s) omitted, including ${input.evidence.binaryFilesExcluded} binary and ` +
+      `${input.evidence.sensitiveFilesExcluded} potentially sensitive file(s).`,
   ];
   let validation = validationLines(220);
 
@@ -96,7 +127,15 @@ export function semanticMarkdownReport(
     "",
     "## Important changes + impact",
     "",
-    ...(changes.length ? changes : ["_No important semantic changes identified._"]),
+    ...(changes.length ? changes : ["*No important semantic changes identified.*"]),
+    "",
+    "## Likely improvements",
+    "",
+    ...(improvements.length ? improvements : ["*No likely improvements identified from the bounded evidence.*"]),
+    "",
+    "## Regression risks",
+    "",
+    ...(risks.length ? risks : ["*No specific regression risks identified from the bounded evidence.*"]),
     "",
     "## Validation results",
     "",
@@ -104,12 +143,16 @@ export function semanticMarkdownReport(
     "",
     "## Per-file details",
     "",
-    ...(details.length ? details : ["_No additional file-level details._"]),
+    ...(details.length ? details : ["*No additional file-level details.*"]),
   ].join("\n")}\n`;
 
   const originalChangeCount = changes.length;
+  const originalImprovementCount = improvements.length;
+  const originalRiskCount = risks.length;
   const originalDetailCount = details.length;
   while (render().length > maxCharacters && details.length) details = details.slice(0, -1);
+  while (render().length > maxCharacters && risks.length) risks = risks.slice(0, -1);
+  while (render().length > maxCharacters && improvements.length) improvements = improvements.slice(0, -1);
   while (render().length > maxCharacters && changes.length > 1) changes = changes.slice(0, -1);
   if (render().length > maxCharacters) summary = shortened(summary, 220);
   if (render().length > maxCharacters) validation = validationLines(100);
@@ -119,19 +162,20 @@ export function semanticMarkdownReport(
   const report = render();
   return {
     report: report.length <= maxCharacters ? report : `${report.slice(0, Math.max(0, maxCharacters - 2)).trimEnd()}\n`,
-    truncated: report.length > maxCharacters || changes.length < originalChangeCount || details.length < originalDetailCount,
+    truncated: report.length > maxCharacters || changes.length < originalChangeCount ||
+      improvements.length < originalImprovementCount || risks.length < originalRiskCount || details.length < originalDetailCount,
   };
 }
 
 export function boundedFallbackMarkdown(
-  input: ReviewResult,
+  input: DeterministicReportInput,
   maxOutputTokens: number,
 ): { report: string; truncated: boolean } {
   const maxCharacters = maxOutputTokens * 4;
   const originalReport = markdownReport(input);
   if (originalReport.length <= maxCharacters) return { report: originalReport, truncated: false };
   let shown = input.changedFiles.length;
-  const compactInput = (count: number): ReviewResult => ({
+  const compactInput = (count: number): DeterministicReportInput => ({
     ...input,
     repositoryPath: shortenedLiteral(input.repositoryPath, 240),
     baseRef: shortenedLiteral(input.baseRef, 120),

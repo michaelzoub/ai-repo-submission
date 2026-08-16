@@ -46,36 +46,75 @@ describe("Git inspection", () => {
     expect(() => changedFiles(repositoryPath, "does-not-exist")).toThrow("Base ref is not a commit");
   });
 
-  it("collects bounded patches while excluding binary and sensitive files", () => {
+  it("collects only bounded git diff -U3 hunks and excludes binary and sensitive files", () => {
     const repositoryPath = createGitFixture();
     fixtures.push(repositoryPath);
-    writeFileSync(join(repositoryPath, "old name.txt"), `password = "super-secret-value"\n${"change\n".repeat(500)}`);
+    writeFileSync(join(repositoryPath, "old name.txt"), Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join("\n") + "\n");
+    git(repositoryPath, "add", "old name.txt");
+    git(repositoryPath, "commit", "-m", "expand fixture");
+    writeFileSync(join(repositoryPath, "old name.txt"), Array.from({ length: 12 }, (_, index) => index === 5 ? "updated line 6" : `line ${index + 1}`).join("\n") + "\n");
     writeFileSync(join(repositoryPath, ".env"), "API_KEY=must-not-leave\n");
     writeFileSync(join(repositoryPath, "image.bin"), Buffer.from([0, 1, 2, 3]));
-    const changes = changedFiles(repositoryPath, "main");
+    const changes = changedFiles(repositoryPath, "HEAD");
 
     const evidence = collectDiffEvidence(repositoryPath, changes.comparisonRef, changes.files, {
       maxFiles: 10,
       maxPatchBytes: 2_000,
       maxPatchBytesPerFile: 1_000,
+      maxPatchTokens: 2_000,
+      maxPatchTokensPerFile: 1_000,
     });
 
     expect(evidence.totalPatchBytes).toBeLessThanOrEqual(2_000);
-    expect(evidence.files.find((file) => file.path === ".env")?.omittedReason).toBe("sensitive_path");
-    expect(evidence.files.find((file) => file.path === "image.bin")).toMatchObject({ binary: true, omittedReason: "binary" });
+    expect(evidence.totalPatchTokens).toBeLessThanOrEqual(2_000);
+    expect(evidence.files.map((file) => file.path)).not.toContain(".env");
+    expect(evidence.files.map((file) => file.path)).not.toContain("image.bin");
+    expect(evidence.binaryFilesExcluded).toBe(1);
+    expect(evidence.sensitiveFilesExcluded).toBe(1);
     const textPatch = evidence.files.find((file) => file.path === "old name.txt");
-    expect(textPatch?.patch).toContain("[REDACTED: potentially sensitive value]");
-    expect(textPatch?.patch).not.toContain("super-secret-value");
-    expect(textPatch?.patchTruncated).toBe(true);
+    expect(textPatch?.patch).toMatch(/^@@ -3,7 \+3,7 @@/);
+    expect(textPatch?.patch).toContain("-line 6\n+updated line 6");
+    expect(textPatch?.patch).not.toContain("diff --git");
+    expect(textPatch?.patch).not.toContain("line 2\n");
+    expect(textPatch?.patch).not.toContain("line 10\n");
+    expect(textPatch?.patchTruncated).toBe(false);
+  });
+
+  it("uses git diff hunks for new files and records per-file and global truncation", () => {
+    const repositoryPath = createGitFixture();
+    fixtures.push(repositoryPath);
+    writeFileSync(join(repositoryPath, "large-new.txt"), "new content\n".repeat(1_000));
+    writeFileSync(join(repositoryPath, "second-new.txt"), "second\n".repeat(100));
+    const changes = changedFiles(repositoryPath, "main");
+
+    const evidence = collectDiffEvidence(repositoryPath, changes.comparisonRef, changes.files, {
+      maxFiles: 1,
+      maxPatchBytes: 220,
+      maxPatchBytesPerFile: 140,
+      maxPatchTokens: 180,
+      maxPatchTokensPerFile: 120,
+    });
+
+    expect(evidence.totalPatchBytes).toBeLessThanOrEqual(180);
+    expect(evidence.totalPatchTokens).toBeLessThanOrEqual(180);
+    expect(evidence.truncated).toBe(true);
+    expect(evidence.filesOmitted).toBeGreaterThan(0);
+    expect(evidence.files[0]).toMatchObject({ status: "untracked", patchTruncated: true });
+    expect(evidence.files[0].patch).toMatch(/^@@ -0,0 \+1,1000 @@/);
+    expect(evidence.files[0].patch).not.toContain("Untracked text file contents");
+    expect(evidence.files[0].patchBytes).toBeLessThanOrEqual(140);
+    expect(evidence.files[0].patchTokens).toBeLessThanOrEqual(120);
   });
 
   it("reports Git whitespace validation without running repository code", () => {
     const repositoryPath = createGitFixture();
     fixtures.push(repositoryPath);
-    writeFileSync(join(repositoryPath, "old name.txt"), "trailing whitespace   \n");
+    writeFileSync(join(repositoryPath, "old name.txt"), "source-must-not-be-forwarded   \n");
     const changes = changedFiles(repositoryPath, "main");
-    expect(validateDiff(repositoryPath, changes.comparisonRef)).toEqual([
-      expect.objectContaining({ name: "Git diff check", status: "failed" }),
+    const validation = validateDiff(repositoryPath, changes.comparisonRef);
+    expect(validation).toEqual([
+      expect.objectContaining({ name: "Git diff check", command: expect.stringContaining("git diff --check"), status: "failed" }),
     ]);
+    expect(validation[0].details).not.toContain("source-must-not-be-forwarded");
   });
 });

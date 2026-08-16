@@ -9,16 +9,13 @@ I first investigated the structure of the system, then went on to see how the CL
 
 ## Interface decision
 
-- Decision: Hybrid
-- Primary user and execution environment: Developers would run it locally; agents would most likely run it in the cloud.
-- Trust boundary and allowed capabilities: Read-only inspection operations only; everything else is illegal.
-- Reliability, discoverability, latency/context, and output tradeoffs: Keep output as compressed and comprehensive as possible; the other tradeoffs are not decided yet.
-- How supported interfaces remain consistent: One shared core with thin adapters for each interface.
-- Evidence that would change this decision: If it ends up being used solely by agents, I would reconsider MCP-first.
+Hybrid: CLI for local developers and MCP for AI agents, both sharing the same core behavior.
 
 ## How did you use an AI coding agent?
 
 ## Where did you check, correct, or reject an AI suggestion? (required)
+
+I corrected the AI design to use bounded `git diff -U3` instead of sending whole source files to OpenRouter. This reduces source exposure while preserving exact changes with minimal context.
 
 ## Commands used to verify the result, with outcomes
 

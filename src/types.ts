@@ -8,6 +8,7 @@ export type ReviewRequest = {
   repositoryPath: string;
   baseRef?: string;
   aiEnabled?: boolean;
+  additionalValidation?: ValidationResult[];
 };
 
 export type ReviewPolicy = {
@@ -16,6 +17,8 @@ export type ReviewPolicy = {
   maxFilesAnalyzed?: number;
   maxPatchBytes?: number;
   maxPatchBytesPerFile?: number;
+  maxPatchTokens?: number;
+  maxPatchTokensPerFile?: number;
   maxOutputTokens?: number;
   analyzer?: ChangeAnalyzer;
   aiEnabled?: boolean;
@@ -31,22 +34,34 @@ export type ReviewResult = {
 };
 
 export type FileEvidence = ChangedFile & {
-  patch?: string;
+  patch: string;
   patchBytes: number;
+  /** Conservative upper bound for provider-token usage. */
+  patchTokens: number;
   patchTruncated: boolean;
-  binary: boolean;
-  omittedReason?: "binary" | "sensitive_path" | "unsupported_file" | "read_error" | "budget";
 };
 
 export type DiffEvidence = {
   files: FileEvidence[];
   filesConsidered: number;
   totalPatchBytes: number;
+  totalPatchTokens: number;
+  filesOmitted: number;
+  binaryFilesExcluded: number;
+  sensitiveFilesExcluded: number;
+  limits: {
+    maxFiles: number;
+    maxPatchBytes: number;
+    maxPatchBytesPerFile: number;
+    maxPatchTokens: number;
+    maxPatchTokensPerFile: number;
+  };
   truncated: boolean;
 };
 
 export type ValidationResult = {
   name: string;
+  command: string;
   status: "passed" | "failed" | "not_run";
   details: string;
 };
@@ -58,6 +73,16 @@ export type SemanticAnalysis = {
     impact: string;
     files: string[];
   }>;
+  likelyImprovements: Array<{
+    title: string;
+    rationale: string;
+    files: string[];
+  }>;
+  regressionRisks: Array<{
+    title: string;
+    rationale: string;
+    files: string[];
+  }>;
   fileDetails: Array<{
     path: string;
     detail: string;
@@ -65,9 +90,6 @@ export type SemanticAnalysis = {
 };
 
 export type AnalysisInput = {
-  baseRef: string;
-  comparisonRef: string;
-  changedFiles: ChangedFile[];
   evidence: DiffEvidence;
   validation: ValidationResult[];
   maxOutputTokens: number;
@@ -87,6 +109,10 @@ export type ReviewOutcome = ReviewResult & {
     filesConsidered: number;
     filesWithPatches: number;
     totalPatchBytes: number;
+    totalPatchTokens: number;
+    filesOmitted: number;
+    binaryFilesExcluded: number;
+    sensitiveFilesExcluded: number;
     truncated: boolean;
   };
   report: string;
