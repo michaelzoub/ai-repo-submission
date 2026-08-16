@@ -15,7 +15,7 @@ export class InspectionError extends Error {
 
 function git(repositoryPath: string, args: string[]): string {
   try {
-    return execFileSync("git", args, {
+    return execFileSync("git", ["-c", "core.fsmonitor=false", ...args], {
       cwd: repositoryPath,
       encoding: "utf8",
       timeout: GIT_TIMEOUT_MS,
@@ -122,7 +122,16 @@ export type ChangeSet = {
 export function changedFiles(repositoryPath: string, baseRef = "main"): ChangeSet {
   const comparisonRef = validateBaseRef(repositoryPath, baseRef);
   const tracked = parseNameStatus(
-    git(repositoryPath, ["diff", "--name-status", "-z", "--find-renames", comparisonRef, "--"]),
+    git(repositoryPath, [
+      "diff",
+      "--no-ext-diff",
+      "--no-textconv",
+      "--name-status",
+      "-z",
+      "--find-renames",
+      comparisonRef,
+      "--",
+    ]),
   );
   const knownPaths = new Set(tracked.map((file) => file.path));
   const untracked = git(repositoryPath, ["ls-files", "--others", "--exclude-standard", "-z"])
