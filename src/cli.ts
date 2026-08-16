@@ -2,13 +2,15 @@
 import { pathToFileURL } from "node:url";
 import { reviewRepository } from "./core.js";
 import { InspectionError } from "./git.js";
-import { jsonReport, markdownReport } from "./report.js";
+import { jsonReport } from "./report.js";
 
 export type CliArgs = {
   command: string;
   repositoryPath?: string;
   baseRef?: string;
   format: "markdown" | "json";
+  aiEnabled: boolean;
+  maxOutputTokens?: number;
   help: boolean;
 };
 
@@ -18,6 +20,8 @@ const USAGE = `Usage:
 Options:
   --base-ref <ref>                 Base commit or branch (default: main)
   --format <markdown|json>         Report format (default: markdown)
+  --max-output-tokens <number>     Maximum report budget (256-8000; default: 1800)
+  --no-ai                          Disable external AI analysis
   --help                           Show this help`;
 
 function optionValue(argv: string[], index: number, option: string): string {
@@ -32,11 +36,16 @@ export function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {
     command: argv[0] ?? "",
     format: "markdown",
+    aiEnabled: true,
     help: argv.includes("--help"),
   };
   for (let index = 1; index < argv.length; index++) {
     const token = argv[index];
     if (token === "--help") continue;
+    if (token === "--no-ai") {
+      args.aiEnabled = false;
+      continue;
+    }
     const value = optionValue(argv, index, token);
     index++;
     switch (token) {
@@ -48,6 +57,14 @@ export function parseArgs(argv: string[]): CliArgs {
         }
         args.format = value;
         break;
+      case "--max-output-tokens": {
+        const parsed = Number(value);
+        if (!Number.isInteger(parsed) || parsed < 256 || parsed > 8_000) {
+          throw new InspectionError("--max-output-tokens must be an integer between 256 and 8000.");
+        }
+        args.maxOutputTokens = parsed;
+        break;
+      }
       default: throw new InspectionError(`Unknown option: ${token}`);
     }
   }
@@ -69,8 +86,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     const result = await reviewRepository({
       repositoryPath: args.repositoryPath,
       baseRef: args.baseRef,
+      aiEnabled: args.aiEnabled,
+    }, {
+      maxOutputTokens: args.maxOutputTokens,
     });
-    const report = args.format === "json" ? jsonReport(result) : markdownReport(result);
+    const report = args.format === "json" ? jsonReport(result) : result.report;
     process.stdout.write(report);
     return 0;
   } catch (error) {

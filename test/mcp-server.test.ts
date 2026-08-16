@@ -25,7 +25,7 @@ describe("MCP contract", () => {
     try {
       const tools = await client.listTools();
       const schema = tools.tools[0].inputSchema as { properties: Record<string, unknown> };
-      expect(Object.keys(schema.properties)).toEqual(["repo_path", "base_ref"]);
+      expect(Object.keys(schema.properties)).toEqual(["repo_path", "base_ref", "max_output_tokens", "ai"]);
 
       const result = await client.callTool({
         name: "review_repository",
@@ -38,9 +38,14 @@ describe("MCP contract", () => {
         total_changed_files: 1,
         changed_files: [{ path: "untracked.txt", status: "untracked" }],
       });
+      expect(result.structuredContent).toMatchObject({
+        analysis_mode: "deterministic",
+        fallback_reason: "unavailable",
+        evidence: { files_considered: 1, files_with_patches: 1 },
+      });
       expect(result.content).toEqual([{
         type: "text",
-        text: "Repository review: 1 changed files; 1 returned.",
+        text: (result.structuredContent as { report_markdown: string }).report_markdown,
       }]);
 
       const denied = await client.callTool({

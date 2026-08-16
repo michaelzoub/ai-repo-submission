@@ -1,7 +1,7 @@
 import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { changedFiles, resolveRepositoryPath } from "../src/git.js";
+import { changedFiles, collectDiffEvidence, resolveRepositoryPath, validateDiff } from "../src/git.js";
 import { createGitFixture, git } from "./helpers.js";
 
 const fixtures: string[] = [];
@@ -44,5 +44,38 @@ describe("Git inspection", () => {
     fixtures.push(repositoryPath);
     expect(() => changedFiles(repositoryPath, "--output=/tmp/oops")).toThrow("Base ref is invalid");
     expect(() => changedFiles(repositoryPath, "does-not-exist")).toThrow("Base ref is not a commit");
+  });
+
+  it("collects bounded patches while excluding binary and sensitive files", () => {
+    const repositoryPath = createGitFixture();
+    fixtures.push(repositoryPath);
+    writeFileSync(join(repositoryPath, "old name.txt"), `password = "super-secret-value"\n${"change\n".repeat(500)}`);
+    writeFileSync(join(repositoryPath, ".env"), "API_KEY=must-not-leave\n");
+    writeFileSync(join(repositoryPath, "image.bin"), Buffer.from([0, 1, 2, 3]));
+    const changes = changedFiles(repositoryPath, "main");
+
+    const evidence = collectDiffEvidence(repositoryPath, changes.comparisonRef, changes.files, {
+      maxFiles: 10,
+      maxPatchBytes: 2_000,
+      maxPatchBytesPerFile: 1_000,
+    });
+
+    expect(evidence.totalPatchBytes).toBeLessThanOrEqual(2_000);
+    expect(evidence.files.find((file) => file.path === ".env")?.omittedReason).toBe("sensitive_path");
+    expect(evidence.files.find((file) => file.path === "image.bin")).toMatchObject({ binary: true, omittedReason: "binary" });
+    const textPatch = evidence.files.find((file) => file.path === "old name.txt");
+    expect(textPatch?.patch).toContain("[REDACTED: potentially sensitive value]");
+    expect(textPatch?.patch).not.toContain("super-secret-value");
+    expect(textPatch?.patchTruncated).toBe(true);
+  });
+
+  it("reports Git whitespace validation without running repository code", () => {
+    const repositoryPath = createGitFixture();
+    fixtures.push(repositoryPath);
+    writeFileSync(join(repositoryPath, "old name.txt"), "trailing whitespace   \n");
+    const changes = changedFiles(repositoryPath, "main");
+    expect(validateDiff(repositoryPath, changes.comparisonRef)).toEqual([
+      expect.objectContaining({ name: "Git diff check", status: "failed" }),
+    ]);
   });
 });

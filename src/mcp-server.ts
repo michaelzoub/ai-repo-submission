@@ -6,10 +6,14 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { reviewRepository } from "./core.js";
 import { InspectionError } from "./git.js";
+import type { ChangeAnalyzer } from "./types.js";
 
 export type McpServerOptions = {
   allowedRoots: string[];
   maxChangedFiles?: number;
+  maxOutputTokens?: number;
+  aiEnabled?: boolean;
+  analyzer?: ChangeAnalyzer;
 };
 
 function structuredResult(result: Awaited<ReturnType<typeof reviewRepository>>) {
@@ -24,16 +28,23 @@ function structuredResult(result: Awaited<ReturnType<typeof reviewRepository>>) 
     })),
     total_changed_files: result.totalChangedFiles,
     changed_files_truncated: result.changedFilesTruncated,
+    analysis_mode: result.analysisMode,
+    ...(result.fallbackReason ? { fallback_reason: result.fallbackReason } : {}),
+    validation: result.validation,
+    evidence: {
+      files_considered: result.evidence.filesConsidered,
+      files_with_patches: result.evidence.filesWithPatches,
+      total_patch_bytes: result.evidence.totalPatchBytes,
+      truncated: result.evidence.truncated,
+    },
+    report_markdown: result.report,
+    output_token_budget: result.outputTokenBudget,
+    output_truncated: result.outputTruncated,
   };
 }
 
-function compactSummary(result: Awaited<ReturnType<typeof reviewRepository>>): string {
-  const truncation = result.changedFilesTruncated ? "; result truncated" : "";
-  return `Repository review: ${result.totalChangedFiles} changed files; ${result.changedFiles.length} returned${truncation}.`;
-}
-
 export function createMcpServer(options: McpServerOptions): McpServer {
-  const server = new McpServer({ name: "repository-inspector", version: "2.0.0" });
+  const server = new McpServer({ name: "repository-inspector", version: "3.0.0" });
   const changedFileSchema = z.object({
     path: z.string(),
     previous_path: z.string().optional(),
@@ -50,6 +61,9 @@ export function createMcpServer(options: McpServerOptions): McpServer {
       inputSchema: {
         repo_path: z.string().min(1).max(4096).describe("Repository path inside an allowed root."),
         base_ref: z.string().min(1).max(1024).optional().describe("Base commit or branch; defaults to main."),
+        max_output_tokens: z.number().int().min(256).max(options.maxOutputTokens ?? 8_000).optional()
+          .describe("Maximum Markdown report budget; defaults to the server policy or 1800."),
+        ai: z.boolean().optional().describe("Use configured AI analysis when available; defaults to the server policy."),
       },
       outputSchema: {
         repository_path: z.string(),
@@ -58,6 +72,22 @@ export function createMcpServer(options: McpServerOptions): McpServer {
         changed_files: z.array(changedFileSchema),
         total_changed_files: z.number().int().nonnegative(),
         changed_files_truncated: z.boolean(),
+        analysis_mode: z.enum(["ai", "deterministic"]),
+        fallback_reason: z.enum(["disabled", "unavailable", "failed", "malformed"]).optional(),
+        validation: z.array(z.object({
+          name: z.string(),
+          status: z.enum(["passed", "failed", "not_run"]),
+          details: z.string(),
+        })),
+        evidence: z.object({
+          files_considered: z.number().int().nonnegative(),
+          files_with_patches: z.number().int().nonnegative(),
+          total_patch_bytes: z.number().int().nonnegative(),
+          truncated: z.boolean(),
+        }),
+        report_markdown: z.string(),
+        output_token_budget: z.number().int().positive(),
+        output_truncated: z.boolean(),
       },
       annotations: {
         readOnlyHint: true,
@@ -66,17 +96,19 @@ export function createMcpServer(options: McpServerOptions): McpServer {
         openWorldHint: false,
       },
     },
-    async ({ repo_path, base_ref }) => {
+    async ({ repo_path, base_ref, max_output_tokens, ai }) => {
       try {
         const result = await reviewRepository(
-          { repositoryPath: repo_path, baseRef: base_ref },
+          { repositoryPath: repo_path, baseRef: base_ref, aiEnabled: ai ?? options.aiEnabled },
           {
             allowedRoots: options.allowedRoots,
             maxChangedFiles: options.maxChangedFiles,
+            maxOutputTokens: max_output_tokens ?? options.maxOutputTokens,
+            analyzer: options.analyzer,
           },
         );
         return {
-          content: [{ type: "text" as const, text: compactSummary(result) }],
+          content: [{ type: "text" as const, text: result.report }],
           structuredContent: structuredResult(result),
         };
       } catch (error) {
