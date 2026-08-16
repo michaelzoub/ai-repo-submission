@@ -25,6 +25,30 @@ const sharedAnalysis: SemanticAnalysis = {
 };
 
 describe("MCP contract", () => {
+  it("fails closed when the server explicitly configures no allowed roots", async () => {
+    const repositoryPath = createGitFixture();
+    fixtures.push(repositoryPath);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const server = createMcpServer({ allowedRoots: [] });
+    const client = new Client({ name: "empty-roots-test", version: "1.0.0" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    try {
+      const result = await client.callTool({
+        name: "review_repository",
+        arguments: { repo_path: repositoryPath, base_ref: "main" },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.content).toContainEqual(expect.objectContaining({
+        type: "text",
+        text: "Repository is outside the server's allowed roots.",
+      }));
+    } finally {
+      await client.close();
+    }
+  });
+
   it("uses its advertised snake_case input and returns structured output", async () => {
     const repositoryPath = createGitFixture();
     fixtures.push(repositoryPath);

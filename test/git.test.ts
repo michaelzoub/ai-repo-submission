@@ -106,6 +106,27 @@ describe("Git inspection", () => {
     expect(evidence.files[0].patchTokens).toBeLessThanOrEqual(120);
   });
 
+  it("omits evidence when a likely secret appears only in hunk context", () => {
+    const repositoryPath = createGitFixture();
+    fixtures.push(repositoryPath);
+    writeFileSync(join(repositoryPath, "old name.txt"), "line 1\nAPI_KEY=secret-in-context\nline 3\nline 4\nline 5\n");
+    git(repositoryPath, "add", "old name.txt");
+    git(repositoryPath, "commit", "-m", "add context fixture");
+    writeFileSync(join(repositoryPath, "old name.txt"), "line 1\nAPI_KEY=secret-in-context\nline 3 updated\nline 4\nline 5\n");
+    const changes = changedFiles(repositoryPath, "HEAD");
+
+    const evidence = collectDiffEvidence(repositoryPath, changes.comparisonRef, changes.files, {
+      maxFiles: 10,
+      maxPatchBytes: 2_000,
+      maxPatchBytesPerFile: 1_000,
+      maxPatchTokens: 2_000,
+      maxPatchTokensPerFile: 1_000,
+    });
+
+    expect(evidence.files).toEqual([]);
+    expect(evidence.sensitiveFilesExcluded).toBe(1);
+  });
+
   it("reports Git whitespace validation without running repository code", () => {
     const repositoryPath = createGitFixture();
     fixtures.push(repositoryPath);

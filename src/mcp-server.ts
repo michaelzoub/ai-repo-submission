@@ -67,7 +67,7 @@ export function createMcpServer(options: McpServerOptions): McpServer {
         repo_path: z.string().min(1).max(4096).describe("Repository path inside an allowed root."),
         base_ref: z.string().min(1).max(1024).optional().describe("Base commit or branch; defaults to main."),
         max_output_tokens: z.number().int().min(256).max(options.maxOutputTokens ?? 8_000).optional()
-          .describe("Maximum Markdown report budget; defaults to the server policy or 1800."),
+          .describe("Approximate Markdown output-token budget; defaults to the server policy or 1800."),
         ai: z.boolean().optional().describe("Request AI analysis. Effective only when server policy also enables external AI."),
       },
       outputSchema: {

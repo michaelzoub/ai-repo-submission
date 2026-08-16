@@ -27,7 +27,7 @@ const USAGE = `Usage:
 Options:
   --base-ref <ref>                 Base commit or branch (default: main)
   --format <markdown|json>         Report format (default: markdown)
-  --max-output-tokens <number>     Maximum report budget (256-8000; default: 1800)
+  --max-output-tokens <number>     Approximate output-token budget (256-8000; default: 1800)
   --ai                             Opt in to external AI analysis
   --no-ai                          Disable external AI analysis (overrides environment)
   --validate <command>             Run one local command (60s; 16 KiB output limit)
@@ -146,7 +146,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     });
     const report = args.format === "json" ? jsonReport(result) : result.report;
     process.stdout.write(report);
-    return 0;
+    return result.validation.some((validation) => validation.status === "failed") ? 2 : 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`Inspector error: ${message}`);

@@ -64,6 +64,22 @@ describe("parseArgs", () => {
     expect(output.join("")).toContain("validation ok");
   });
 
+  it("returns exit code 2 when validation fails after a completed review", async () => {
+    const repositoryPath = createGitFixture();
+    fixtures.push(repositoryPath);
+    writeFileSync(join(repositoryPath, "old name.txt"), "changed\n");
+    const output: string[] = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      output.push(String(chunk));
+      return true;
+    });
+
+    expect(await main([
+      "review", "--repo", repositoryPath, "--validate", "node -e \"process.exit(3)\"",
+    ])).toBe(2);
+    expect(output.join("")).toContain("**failed — CLI validation:**");
+  });
+
   it("limits validation output", () => {
     const repositoryPath = createGitFixture();
     fixtures.push(repositoryPath);

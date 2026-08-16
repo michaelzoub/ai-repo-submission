@@ -57,7 +57,7 @@ export function resolveRepositoryPath(repositoryPath: string, allowedRoots?: str
     throw new InspectionError("Git returned an inaccessible repository root.");
   }
 
-  if (allowedRoots?.length) {
+  if (allowedRoots !== undefined) {
     const roots = allowedRoots.map((root) => {
       try {
         return realpathSync(resolve(root));
@@ -208,7 +208,6 @@ function containsPotentialSecret(patch: string): boolean {
   const sensitiveAssignment = /(?:api[_-]?key|access[_-]?token|client[_-]?secret|password|authorization)\s*[:=]/i;
   const credentialValue = /(?:sk-[a-z0-9_-]{16,}|gh[opurs]_[a-z0-9]{20,}|[a-f0-9]{40,}|[a-z0-9+/]{48,}={0,2})/i;
   return patch.split("\n").some((line) =>
-    (line.startsWith("+") || line.startsWith("-")) &&
     (sensitiveAssignment.test(line) || credentialValue.test(line) || /-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(line)),
   );
 }

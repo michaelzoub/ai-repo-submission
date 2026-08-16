@@ -13,7 +13,7 @@ The inspector resolves the merge base of the requested base ref and `HEAD`, then
 
 When AI is explicitly enabled and configured, the report contains a short semantic summary, important changes ordered by significance, explicit likely improvements, explicit regression risks, local validation results, and concise details for relevant files. Likely improvements and regression risks are separate required arrays in the provider JSON contract and separate Markdown sections. Application code validates every field and file reference, then renders Markdown deterministically. AI failures, timeouts, malformed responses, and disabled or missing AI configuration fall back cleanly to the deterministic report.
 
-At most 500 changed-file records are returned. AI evidence is prioritized and bounded by both bytes and a deliberately conservative token upper bound. Defaults are 40 files, 16 KiB and 4,000 conservative tokens per file, and 96 KiB and 24,000 conservative tokens globally. Since the token upper bound counts each UTF-8 byte as a possible token, the token cap is intentionally cautious across downstream model tokenizers. Git subprocesses and provider requests also have timeouts and output limits. The Markdown report defaults to a 1,800-token budget; lower-priority file details are omitted first.
+At most 500 changed-file records are returned. AI evidence is prioritized and bounded by both bytes and a deliberately conservative token upper bound. Defaults are 40 files, 16 KiB and 4,000 conservative tokens per file, and 96 KiB and 24,000 conservative tokens globally. Since the token upper bound counts each UTF-8 byte as a possible token, the token cap is intentionally cautious across downstream model tokenizers. Git subprocesses and provider requests also have timeouts and output limits. The Markdown report defaults to an approximate 1,800-output-token budget implemented through a character bound; lower-priority file details are omitted first.
 
 ### External-model trust boundary
 
@@ -47,7 +47,7 @@ npm run inspector -- review --repo ./path/to/repo --format json
 npm run inspector -- review --repo ./path/to/repo > review-report.md
 ```
 
-Markdown is the default format. Output always goes to stdout. Use `--help` for all options. Exit status is `0` when inspection succeeds, including when AI falls back, and `1` for an inspection or usage error.
+Markdown is the default format. Output always goes to stdout. Use `--help` for all options. Exit status is `0` when inspection and validation succeed, `2` when the review completes but any validation fails, and `1` for an inspection or usage error. AI fallback alone does not make the command fail.
 
 External AI is opt-in. The CLI requires either `--ai` or `INSPECTOR_AI_ENABLED=true`; `--no-ai` overrides the environment. `OPENROUTER_API_KEY` supplies credentials but does not authorize source-code egress by itself. `OPENROUTER_MODEL` selects the model and defaults to `openai/gpt-4.1-mini`; `OPENROUTER_BASE_URL` overrides the HTTPS API base; and `INSPECTOR_AI_TIMEOUT_MS` controls the bounded request timeout. The `ChangeAnalyzer` interface is provider-neutral, so another implementation can be injected without changing core review behavior.
 
@@ -71,7 +71,7 @@ The `review_repository` tool accepts:
 
 - `repo_path` (required): repository or subdirectory inside an allowed root.
 - `base_ref` (optional): base commit or branch; defaults to `main`.
-- `max_output_tokens` (optional): Markdown budget between 256 and the server limit.
+- `max_output_tokens` (optional): approximate Markdown output-token budget between 256 and the server limit.
 - `ai` (optional): requests external AI. It is effective only when the server/operator also started the server with `INSPECTOR_AI_ENABLED=true`; a client cannot override disabled server policy.
 
 It returns the same shared-core, budgeted Markdown as the CLI plus the bounded result as structured output. There is deliberately no validation-command input. Its annotations declare it read-only, idempotent, non-destructive, and closed-world. These annotations describe the contract; they are not enforcement.
